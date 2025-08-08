@@ -6,12 +6,12 @@ on:
       name:
         default: test
         type: string
-     age:
+      age:
         options: 
           - male
           - female
         type: choice
-    Married:
+      Married:
         type: boolean   
 
 
