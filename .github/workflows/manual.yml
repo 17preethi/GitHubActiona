@@ -6,6 +6,13 @@ on:
       name:
         default: test
         type: string
+     age:
+        options: 
+          - male
+          - female
+        type: choice
+    Married:
+        type: boolean   
 
 
 jobs:
