@@ -2,6 +2,10 @@ name: Hello World
 
 on:
   workflow_dispatch:
+    inputs:
+      name:
+        default: test
+        type: string
 
 
 jobs:
@@ -9,4 +13,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Greetings
-        run: echo "Hello World"
+        run: echo "${{ inputs.name }}"
