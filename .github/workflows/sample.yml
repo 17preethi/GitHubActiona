@@ -1,0 +1,187 @@
+name: EZN Admin CI/CD
+
+on:
+  push:
+    branches:
+      - 'release/**'
+      - 'feature/docker-workflow-files'
+    paths:
+      - 'ezn-admin/**'    # Only trigger if files inside ezn-admin/ are modified
+  pull_request:
+    branches:
+      - 'release/**'
+      - 'feature/docker-workflow-files'
+    paths:
+      - 'ezn-admin/**'    # Only trigger if files inside ezn-admin/ are modified
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to promote to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      image_tag:
+        description: 'Image tag to promote (optional)'
+        required: false
+        type: string
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: ezn-sample
+
+jobs:
+  # Security and Code Quality
+  security-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: './ezn-admin'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always() && github.event_name != 'pull_request'
+        with:
+          sarif_file: 'trivy-results.sarif'
+        continue-on-error: true
+
+      - name: Display security scan results
+        if: always()
+        run: |
+          echo "## 🔒 Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f "trivy-results.sarif" ]; then
+            echo "✅ Security scan completed successfully" >> $GITHUB_STEP_SUMMARY
+            echo "📊 Results saved to: trivy-results.sarif" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Security scan completed but no results file found" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> **Note**: To view detailed security results, enable code scanning in your repository settings." >> $GITHUB_STEP_SUMMARY
+
+  # Build and Test
+  build-and-test:
+    runs-on: ubuntu-latest
+    needs: security-scan
+    strategy:
+      matrix:
+        node-version: [18, 20, 22]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Setup PostgreSQL
+        uses: Harmon758/postgresql-action@v1.0.0
+        with:
+          postgresql version: '15'
+          postgresql db: 'ezn-dev'
+          postgresql user: 'postgres'
+          postgresql password: 'admin'
+
+      - name: Install dependencies
+        run: |
+          cd ezn-admin
+          npm install
+
+      - name: Run linting
+        run: |
+          cd ezn-admin
+          npm run lint
+
+      - name: Run tests
+        run: |
+          cd ezn-admin
+          npm test
+        env:
+          DATABASE_URL: postgresql://postgres:admin@localhost:5432/ezn-dev
+
+  # Build and Push to ECR (Development)
+  build-and-push-dev:
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.ref == 'refs/heads/release/dev' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feature/docker-workflow-files' || github.event.inputs.environment == 'dev'
+    outputs:
+      image-tag: ${{ steps.image-tag.outputs.tag }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          cd ezn-admin
+          npm install
+
+      - name: Build
+        run: |
+          cd ezn-admin
+          npm run build
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Generate image tag
+        id: image-tag
+        run: |
+          if [ "${{ github.event.inputs.image_tag }}" != "" ]; then
+            echo "tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=dev-${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build Docker image
+        run: |
+          cd ezn-admin
+          docker build -t ezn-admin:ci .
+
+      - name: Tag Docker image for ECR
+        run: |
+          docker tag ezn-admin:ci ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}/ezn-admin:${{ steps.image-tag.outputs.tag }}
+          docker tag ezn-admin:ci ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}/ezn-admin:dev-latest
+
+      - name: Push Docker image to ECR
+        run: |
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}/ezn-admin:${{ steps.image-tag.outputs.tag }}
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}/ezn-admin:dev-latest
+
+      - name: Output image tag
+        run: |
+          echo "Built and pushed image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}/ezn-admin:${{ steps.image-tag.outputs.tag }}"
+          echo "Image tag: ${{ steps.image-tag.outputs.tag }}" >> $GITHUB_OUTPUT
+
+  
